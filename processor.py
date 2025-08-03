@@ -38,8 +38,11 @@ def load_yolo_model(model_name):
 # 文件名: processor.py
 # ... (顶部的import和load_yolo_model函数保持不变) ...
 
+# 文件名: processor.py
+# ... (顶部的import和load_yolo_model函数保持不变) ...
+
 def repair_image_in_memory(wm_data, orig_data, model, config):
-    """在内存中对单对图片进行修复 (最终修正版)"""
+    """在内存中对单对图片进行修复 (完全复刻本地成功逻辑版)"""
     wm_img_np = np.frombuffer(wm_data, np.uint8)
     orig_img_np = np.frombuffer(orig_data, np.uint8)
     high_res_img = cv2.imdecode(wm_img_np, cv2.IMREAD_COLOR)
@@ -50,54 +53,45 @@ def repair_image_in_memory(wm_data, orig_data, model, config):
 
     h_high, w_high, _ = high_res_img.shape
     
-    # --- 1. 划定搜索区域 (统一) ---
-    search_x_start = int(w_high * config['SEARCH_REGION_RATIOS'][0])
-    search_y_start = int(h_high * config['SEARCH_REGION_RATIOS'][1])
-    search_x_end = int(w_high * config['SEARCH_REGION_RATIOS'][2])
-    search_y_end = int(h_high * config['SEARCH_REGION_RATIOS'][3])
-    search_region = high_res_img[search_y_start:search_y_end, search_x_start:search_x_end]
+    # --- 强制使用与本地脚本完全一致的搜索区域 ---
+    search_region = high_res_img[h_high // 2:, :] 
     
-    # --- 2. YOLO 预测 ---
+    # --- YOLO 预测 ---
     results = model.predict(source=search_region, conf=config['YOLO_CONFIDENCE_THRESHOLD'], verbose=False)
     boxes = results[0].boxes
     if len(boxes) == 0:
         return None, "未在指定区域内定位到水印"
 
-    # --- 3. 强制使用最可靠的、经过验证的修复区域计算逻辑 (源自你的本地微博脚本) ---
+    # --- ⬇️⬇️⬇️ 100% 复刻本地微博脚本的坐标计算和修复逻辑 ⬇️⬇️⬇️ ---
     all_xyxy = boxes.xyxy.cpu().numpy()
     
-    # 获取相对于 "search_region" 的坐标
-    x_min_rel = int(np.min(all_xyxy[:, 0]))
+    # 1. 获取相对于 search_region 的坐标
+    x_min = int(np.min(all_xyxy[:, 0]))
     y_min_rel = int(np.min(all_xyxy[:, 1]))
-    x_max_rel = int(np.max(all_xyxy[:, 2])) # LOFTER需要x_max
     y_max_rel = int(np.max(all_xyxy[:, 3]))
 
-    # 关键修正：将所有相对坐标，都转换回整张图的绝对坐标
-    x_min_abs = x_min_rel + search_x_start
-    y_min_abs = y_min_rel + search_y_start
-    x_max_abs = x_max_rel + search_x_start
-    y_max_abs = y_max_rel + search_y_start
-        
-    # 现在，我们用这套绝对坐标，来执行和你本地脚本完全一致的扩大逻辑
-    original_height = y_max_abs - y_min_abs
+    # 2. 只转换 y 坐标为绝对坐标
+    y_min_abs = y_min_rel + h_high // 2
+    y_max_abs = y_max_rel + h_high // 2
+    
+    # 3. 完全照搬本地脚本的扩大逻辑
+    original_height = y_max_rel - y_min_rel
     height_margin = int(original_height * config['HEIGHT_EXPANSION_RATIO'])
     base_margin = config.get('BASE_MARGIN', 5)
-    
+
     y_start = max(0, y_min_abs - height_margin - base_margin)
     y_end = min(h_high, y_max_abs + height_margin + base_margin)
     
     model_choice = config['MODEL_CHOICE']
     if model_choice == "微博":
-        # 微博模式下，x_start基于识别框左侧，x_end延伸
-        x_start = max(0, x_min_abs - base_margin)
+        x_start = max(0, x_min - base_margin)
         x_end = w_high 
-    else: # LOFTER模式，x基于识别框两侧扩大
-        original_width = x_max_abs - x_min_abs
-        width_margin = int((original_width * config['WIDTH_EXPANSION_RATIO']) / 2)
-        x_start = max(0, x_min_abs - width_margin - base_margin)
-        x_end = min(w_high, x_max_abs + width_margin + base_margin)
-    
-    # --- 4. 执行修复 (这部分逻辑早已被验证是正确的) ---
+    else: # LOFTER也暂时使用类似的逻辑，但x_end不延伸
+        x_max = int(np.max(all_xyxy[:, 2]))
+        x_start = max(0, x_min - base_margin)
+        x_end = min(w_high, x_max + base_margin)
+
+    # --- 4. 执行修复 ---
     low_res_resized = cv2.resize(low_res_img, (w_high, h_high), interpolation=cv2.INTER_LANCZOS4)
     clean_patch = low_res_resized[y_start:y_end, x_start:x_end]
 
@@ -110,7 +104,7 @@ def repair_image_in_memory(wm_data, orig_data, model, config):
     return buffer.tobytes(), "修复成功"
 
 
-# ... (process_zip_with_selected_model 函数保持不变) ...
+# ... (process_zip_with_selected_model 函数保持不变, UI侧的搜索区域滑块可以暂时隐藏或禁用) ...
 # --- 新的、统一的入口函数 ---
 def process_zip_with_selected_model(zip_file_obj, config, status_area):
     """根据前端选择的模型，在内存中处理ZIP包"""

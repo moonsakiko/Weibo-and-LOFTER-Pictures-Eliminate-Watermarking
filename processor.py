@@ -8,15 +8,15 @@ import numpy as np
 from ultralytics import YOLO
 from pathlib import Path
 import streamlit as st
+from PIL import Image # 引入我们新的“高质量编码”大师
 
-# --- 缓存模型加载 (升级版) ---
-# 现在它可以根据传入的名字，加载并缓存不同的模型
+# --- 缓存模型加载 (保持最终成功版) ---
 @st.cache_resource
 def load_yolo_model(model_name):
-    # 根据模型名字，构建不同的文件路径
-    # 你需要把 lofter.pt (LOFTER) 和 weibo.pt (微博) 都上传到仓库
+    # 根据我们最终的调试结果，这里可能需要绝对路径
+    # 为了通用性，我们先尝试相对路径，如果部署失败再换成绝对路径
     if model_name == "LOFTER":
-        model_path = "lofter.pt"
+        model_path = "best.pt"
     elif model_name == "微博":
         model_path = "weibo.pt"
     else:
@@ -34,48 +34,41 @@ def load_yolo_model(model_name):
         except Exception as e2:
              raise FileNotFoundError(f"在 {model_path} 和 {abs_model_path} 都无法加载YOLO模型！请确保模型文件已上传。错误: {e2}")
 
-
-# 文件名: processor.py
-# ... (顶部的import和load_yolo_model函数保持不变) ...
-
-# 文件名: processor.py
-# ... (顶部的import和load_yolo_model函数保持不变) ...
-
 def repair_image_in_memory(wm_data, orig_data, model, config):
-    """在内存中对单对图片进行修复 (完全复刻本地成功逻辑版)"""
+    """在内存中对单对图片进行修复 (最终保真版)"""
+    
+    # --- 1. 格式检测与初始解码 ---
+    # 我们先用Pillow来嗅探一下原始格式
+    original_format = Image.open(io.BytesIO(wm_data)).format
+
     wm_img_np = np.frombuffer(wm_data, np.uint8)
     orig_img_np = np.frombuffer(orig_data, np.uint8)
-    high_res_img = cv2.imdecode(wm_img_np, cv2.IMREAD_COLOR)
-    low_res_img = cv2.imdecode(orig_img_np, cv2.IMREAD_COLOR)
+    # 使用 cv2.IMREAD_UNCHANGED 来保留PNG的透明通道(如果存在)
+    high_res_img = cv2.imdecode(wm_img_np, cv2.IMREAD_UNCHANGED)
+    low_res_img = cv2.imdecode(orig_img_np, cv2.IMREAD_UNCHANGED)
     
     if high_res_img is None or low_res_img is None: 
         return None, "图片解码失败"
 
-    h_high, w_high, _ = high_res_img.shape
-    
-    # --- 强制使用与本地脚本完全一致的搜索区域 ---
-    search_region = high_res_img[h_high // 2:, :] 
-    
-    # --- YOLO 预测 ---
+    # --- 2. 所有修复逻辑 (使用我们最终调试好的、最健壮的版本) ---
+    # 这部分代码我们已经验证过是正确的，完全保留
+    h_high, w_high, *_ = high_res_img.shape
+    search_region = high_res_img[h_high // 2:, :]
     results = model.predict(source=search_region, conf=config['YOLO_CONFIDENCE_THRESHOLD'], verbose=False)
     boxes = results[0].boxes
     if len(boxes) == 0:
         return None, "未在指定区域内定位到水印"
 
-    # --- ⬇️⬇️⬇️ 100% 复刻本地微博脚本的坐标计算和修复逻辑 ⬇️⬇️⬇️ ---
     all_xyxy = boxes.xyxy.cpu().numpy()
-    
-    # 1. 获取相对于 search_region 的坐标
-    x_min = int(np.min(all_xyxy[:, 0]))
+    x_min_rel = int(np.min(all_xyxy[:, 0]))
     y_min_rel = int(np.min(all_xyxy[:, 1]))
+    x_max_rel = int(np.max(all_xyxy[:, 2]))
     y_max_rel = int(np.max(all_xyxy[:, 3]))
 
-    # 2. 只转换 y 坐标为绝对坐标
     y_min_abs = y_min_rel + h_high // 2
     y_max_abs = y_max_rel + h_high // 2
-    
-    # 3. 完全照搬本地脚本的扩大逻辑
-    original_height = y_max_rel - y_min_rel
+
+    original_height = y_max_abs - y_min_abs
     height_margin = int(original_height * config['HEIGHT_EXPANSION_RATIO'])
     base_margin = config.get('BASE_MARGIN', 5)
 
@@ -84,14 +77,13 @@ def repair_image_in_memory(wm_data, orig_data, model, config):
     
     model_choice = config['MODEL_CHOICE']
     if model_choice == "微博":
-        x_start = max(0, x_min - base_margin)
-        x_end = w_high 
-    else: # LOFTER也暂时使用类似的逻辑，但x_end不延伸
-        x_max = int(np.max(all_xyxy[:, 2]))
-        x_start = max(0, x_min - base_margin)
-        x_end = min(w_high, x_max + base_margin)
-
-    # --- 4. 执行修复 ---
+        x_start = max(0, x_min_rel - base_margin)
+        x_end = w_high
+    else: # LOFTER
+        x_max_rel = int(np.max(all_xyxy[:, 2]))
+        x_start = max(0, x_min_rel - base_margin)
+        x_end = min(w_high, x_max_rel + base_margin)
+        
     low_res_resized = cv2.resize(low_res_img, (w_high, h_high), interpolation=cv2.INTER_LANCZOS4)
     clean_patch = low_res_resized[y_start:y_end, x_start:x_end]
 
@@ -100,12 +92,31 @@ def repair_image_in_memory(wm_data, orig_data, model, config):
     
     high_res_img[y_start:y_end, x_start:x_end] = clean_patch
     
-    _, buffer = cv2.imencode('.jpg', high_res_img, [cv2.IMWRITE_JPEG_QUALITY, 98])
-    return buffer.tobytes(), "修复成功"
+    # --- ⬇️⬇️⬇️ 3. 最终的“心脏移植”：根据原始格式，选择不同的编码器 ⬇️⬇️⬇️ ---
+    
+    if original_format == 'PNG':
+        # 如果原始文件是PNG，我们用Pillow来保存，以求最大保真
+        # a. 转换色彩通道：OpenCV是BGR(A)，Pillow是RGB(A)
+        if high_res_img.shape[2] == 4:
+            color_converted_img = cv2.cvtColor(high_res_img, cv2.COLOR_BGRA2RGBA)
+        else:
+            color_converted_img = cv2.cvtColor(high_res_img, cv2.COLOR_BGR2RGB)
+        
+        # b. 从NumPy数组创建Pillow图像
+        pil_image = Image.fromarray(color_converted_img)
+        
+        # c. 保存到内存缓冲区
+        buffer = io.BytesIO()
+        # Pillow的PNG编码器参数：compress_level=1 (最少压缩，最大保真)
+        pil_image.save(buffer, format='PNG', compress_level=1)
+        buffer.seek(0)
+        return buffer.getvalue(), f"修复成功 (PNG保真模式)"
+
+    else: # 对于JPG和其他格式，我们依然信任高效的OpenCV
+        _, buffer = cv2.imencode('.jpg', high_res_img, [cv2.IMWRITE_JPEG_QUALITY, 98])
+        return buffer.tobytes(), f"修复成功 (JPG高效模式)"
 
 
-# ... (process_zip_with_selected_model 函数保持不变, UI侧的搜索区域滑块可以暂时隐藏或禁用) ...
-# --- 新的、统一的入口函数 ---
 def process_zip_with_selected_model(zip_file_obj, config, status_area):
     """根据前端选择的模型，在内存中处理ZIP包"""
     model = load_yolo_model(config['MODEL_CHOICE'])
@@ -138,6 +149,7 @@ def process_zip_with_selected_model(zip_file_obj, config, status_area):
             repaired_data, message = repair_image_in_memory(wm_data, orig_data, model, config)
             
             if repaired_data:
+                # 保持原始文件名和格式
                 output_zip.writestr(Path(wm_path).name, repaired_data)
                 report_lines.append(f"  [成功] {Path(wm_path).name} - {message}")
             else:

@@ -16,7 +16,7 @@ def load_yolo_model(model_name):
     # 根据我们最终的调试结果，这里可能需要绝对路径
     # 为了通用性，我们先尝试相对路径，如果部署失败再换成绝对路径
     if model_name == "LOFTER":
-        model_path = "best.pt"
+        model_path = "lofter.pt"
     elif model_name == "微博":
         model_path = "weibo.pt"
     else:
